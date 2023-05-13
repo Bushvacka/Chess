@@ -1,68 +1,103 @@
 import os
 import numpy as np
+from tqdm import tqdm
 import torch
 from torch import nn, optim
-import torch.nn.functional as F
 from torch_utils import AverageMeter
-from torchviz import make_dot
 import Chess
-
 
 LEARNING_RATE = .001
 DROPOUT = 0.3
 EPOCHS = 10
 BATCH_SIZE = 64
-NUM_CHANNELS = 512
+NUM_CHANNELS = 128
+
+MODEL_FOLDER = "models"
+MODEL_FILE_NAME = "model.pth.tar"
+
+torch.backends.cudnn.enabled = False
+
 class Model(nn.Module):
     def __init__(self):
         super(Model, self).__init__()
-
         self.num_channels = NUM_CHANNELS
-        self.board_size = Chess.BOARD_SIZE
-        self.dropout = DROPOUT
 
-        self.conv = nn.Sequential(
-            nn.Conv2d(1, self.num_channels, 3, stride=1, padding=1),
-            nn.BatchNorm2d(self.num_channels),
+        self.conv_layers = nn.Sequential(
+            nn.Conv2d(6, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
             nn.ReLU(),
-            nn.Conv2d(self.num_channels, self.num_channels, 3, stride=1, padding=1),
-            nn.BatchNorm2d(self.num_channels),
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
             nn.ReLU(),
-            nn.Conv2d(self.num_channels, self.num_channels, 3, stride=1),
-            nn.BatchNorm2d(self.num_channels),
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
             nn.ReLU(),
-            nn.Conv2d(self.num_channels, self.num_channels, 3, stride=1),
-            nn.BatchNorm2d(self.num_channels),
-            nn.ReLU(inplace=True)
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
+            nn.ReLU(),
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
+            nn.ReLU(),
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
+            nn.ReLU(),
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
+            nn.ReLU(),
         )
 
-        self.fc = nn.Sequential(
-            nn.Linear(self.num_channels * (self.board_size - 4) * (self.board_size - 4), 1024),
-            nn.BatchNorm1d(1024),
+        self.policy_head = nn.Sequential(
+            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(NUM_CHANNELS),
             nn.ReLU(),
-            nn.Dropout(self.dropout),
-            nn.Linear(1024, 512),
-            nn.BatchNorm1d(512),
+            nn.Conv2d(NUM_CHANNELS, 8, kernel_size=1, padding=0),
+            nn.BatchNorm2d(8),
             nn.ReLU(),
-            nn.Dropout(self.dropout)
+            nn.Flatten(),
+            nn.Linear(8 * 8 * 8, Chess.ACTION_SIZE),
+            nn.Softmax(dim=1),
         )
 
-        self.fc_policy = nn.Linear(512, Chess.ACTION_SIZE)
-        self.fc_value = nn.Linear(512, 1)
+        self.value_head = nn.Sequential(
+            nn.Conv2d(NUM_CHANNELS, 1, kernel_size=1, padding=0),
+            nn.BatchNorm2d(1),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(8 * 8, 64),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Tanh(),
+        )
+
+        self.to(torch.device('cuda'))
 
     def forward(self, state):
-        # s: batch_size x board_x x board_y
-        state = state.view(-1, 1, self.board_size, self.board_size)  # batch_size x 1 x board_x x board_y
-        state = self.conv(state)  # batch_size x num_channels x (board_x-4) x (board_y-4)
-        state = state.view(-1, self.num_channels * (self.board_size - 4) * (self.board_size - 4))
-        state = self.fc(state)  # batch_size x 512
+        state = state.view(-1, 6, 8, 8)
+        state = self.conv_layers(state)
+        policy_output = self.policy_head(state)
+        value_output = self.value_head(state)
 
-        pi = self.fc_policy(state)  # batch_size x action_size
-        v = self.fc_value(state)  # batch_size x 1
-
-        return F.log_softmax(pi, dim=1), torch.tanh(v)
+        return policy_output, value_output
 
 
+    def predict(self, board):
+        # Convert to tensor
+        board_tensor = torch.FloatTensor(board).contiguous().cuda()
+        self.eval()
+
+        # Get prediction
+        with torch.no_grad():
+            policy, value = self.forward(board_tensor)
+
+        # Bring back to CPU
+        policy = policy.contiguous().cpu()
+        value = value.contiguous().cpu()
+
+        value = np.reshape(value, (-1)) # Flatten value output
+
+        return policy.data.numpy()[0], value.data.numpy()[0]
+    
     def train_nn(self, examples):
         """
         Train the model on the set of examples EPOCH times. Process the examples in batches
@@ -77,7 +112,7 @@ class Model(nn.Module):
         batch_count = int(num_examples / BATCH_SIZE)
 
         self.train()
-        for _ in range(EPOCHS):
+        for _ in tqdm(range(EPOCHS), desc="Epochs"):
             for batch in range(batch_count):
                 # Extract a batch of examples
                 start = batch * BATCH_SIZE
@@ -93,9 +128,9 @@ class Model(nn.Module):
                 target_values = [example[2] for example in batch_examples]
 
                 # Convert to tensors
-                canonical_boards = torch.FloatTensor(np.array(canonical_boards).astype(np.float64))
-                target_policies = torch.FloatTensor(np.array(target_policies))
-                target_values = torch.FloatTensor(np.array(target_values).astype(np.float64))
+                canonical_boards = torch.FloatTensor(np.array(canonical_boards)).contiguous().cuda()
+                target_policies = torch.FloatTensor(np.array(target_policies)).contiguous().cuda()
+                target_values = torch.FloatTensor(np.array(target_values)).contiguous().cuda()
 
                 # Get model prediction
                 policies, values = self.forward(canonical_boards)
@@ -113,37 +148,17 @@ class Model(nn.Module):
                 optimizer.zero_grad()
                 loss.backward()
                 optimizer.step()
-                
-
-    def predict(self, board):
-        board_tensor = torch.FloatTensor(board)
-        board_tensor = board_tensor.view(1, 8, 8)
-        self.eval()
-        with torch.no_grad():
-            policy, value = self.forward(board_tensor)
-        policy = torch.exp(policy) # Normalize policy vectors
-        value = np.reshape(value, (-1))
-        return policy.data.numpy()[0], value.data.numpy()[0]
     
-    
-    def saveCheckpoint(self, folder, filename):
-        filepath = os.path.join(folder, filename)
-        if not os.path.exists(folder):
-            print("Making directory {}".format(folder))
-            os.mkdir(folder)
+    def saveCheckpoint(self):
+        filepath = os.path.join(MODEL_FOLDER, MODEL_FILE_NAME)
+        if not os.path.exists(MODEL_FOLDER):
+            print("Making directory {}".format(MODEL_FOLDER))
+            os.mkdir(MODEL_FOLDER)
         torch.save({'state_dict': self.state_dict(),}, filepath)
 
-    def loadCheckpoint(self, folder, filename):
-        filepath = os.path.join(folder, filename)
+    def loadCheckpoint(self):
+        filepath = os.path.join(MODEL_FOLDER, MODEL_FILE_NAME)
         if not os.path.exists(filepath):
             raise ("No model in path {}".format(filepath))
-        checkpoint = torch.load(filepath, map_location='cpu')
+        checkpoint = torch.load(filepath, map_location='cuda')
         self.load_state_dict(checkpoint['state_dict'])
-
-    def visualizeModel(self):
-        board = Chess.getInitBoard()
-        board_tensor = torch.FloatTensor(Chess.integerRepresentation(board))
-        board_tensor = board_tensor.view(1, self.board_size, self.board_size)
-        self.eval()
-        out = self.forward(board_tensor)
-        make_dot(out, params=dict(self.named_parameters())).render(filename="visualization", format='png')

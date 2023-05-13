@@ -1,7 +1,7 @@
-import os, random, time, threading
+import os, random, threading, time
 import numpy as np
-from collections import deque
 from pickle import Pickler, Unpickler
+import json
 from tqdm import tqdm
 
 from MCTS import MCTS
@@ -19,18 +19,16 @@ NUMBER_OF_GAMES_TO_PLAY = 30
 TEMPERATURE_THRESHOLD = 30
 REPLACE_THRESHOLD = 0.6
 
-MAX_NUMBER_OF_EXAMPLES = 200000
+MAX_NUMBER_OF_EXAMPLES = 300000
 
-MODEL_FOLDER = "checkpoints/models"
-MODEL_FILE_NAME = "model"
-MODEL_FILE_EXTENSION = ".pth.tar"
+LOAD_MODEL = False
+LOAD_EXAMPLES = True
+LOAD_PGN = False
+SKIP_FIRST_ITERATION = True
 
-EXAMPLE_FOLDER = "checkpoints/examples"
+EXAMPLE_FOLDER = "examples"
 EXAMPLE_FILE_NAME = "example"
 EXAMPLE_FILE_EXTENSION = ".examples"
-LOAD_EXAMPLES = False
-
-
 
 class Trainer():
     """
@@ -64,6 +62,9 @@ class Trainer():
             temperature = 1 if number_of_moves < TEMPERATURE_THRESHOLD else 0
             policy = mcts.getActionProbabilities(canonical_board, temperature)
 
+            # Save the board as a training example
+            training_examples.append([canonical_board, current_player, policy, None]) # TODO: Implement symmetries
+            
             # Pick an action
             action = np.random.choice(Chess.ACTION_SIZE, p=policy)
             # Get the corresponding move
@@ -71,12 +72,12 @@ class Trainer():
                 move = Chess.getMoveFromAction(action)
             else: # Convert move back from canonical form
                 move = Chess.getMirroredMoveFromAction(action)
+
+           
             # Play the move
             board, current_player = Chess.getNextState(board, move)
             number_of_moves += 1
 
-            # Save the board as a training example
-            training_examples.append([canonical_board, current_player, policy, None]) # TODO: Implement symmetries
 
             # Update status of the game
             result = Chess.getGameEnded(board, current_player)
@@ -106,20 +107,26 @@ class Trainer():
 
         if LOAD_EXAMPLES:
             self.training_examples = self.loadTrainingExamples()
+        elif LOAD_PGN:
+            self.training_examples = Chess.loadFromPGN()
 
-        for _ in tqdm(range(NUMBER_OF_ITERATIONS)):
-            threads = []
-            for __ in range(NUM_THREADS):
-                # Create threads to generate training examples
-                threads.append(threading.Thread(target=self.generateTrainingExamples, args=(EPISODES_PER_ITERATION//NUM_THREADS,)))
-            
-            # Start generating examples
-            for thread in threads:
-                thread.start()
-            
-            # Wait for all threads to finish
-            for thread in threads:
-                thread.join()
+        if LOAD_MODEL:
+            self.model.loadCheckpoint()
+
+        for iteration in tqdm(range(NUMBER_OF_ITERATIONS), desc="Iterations"):
+            if not (iteration == 1 and SKIP_FIRST_ITERATION):
+                threads = []
+                for __ in range(NUM_THREADS):
+                    # Create threads to generate training examples
+                    threads.append(threading.Thread(target=self.generateTrainingExamples, args=(EPISODES_PER_ITERATION//NUM_THREADS,)))
+                
+                # Start generating examples
+                for thread in threads:
+                    thread.start()
+                
+                # Wait for all threads to finish
+                for thread in threads:
+                    thread.join()
 
             # Remove the oldest examples if necessary
             num_examples = len(self.training_examples)
@@ -130,18 +137,17 @@ class Trainer():
             self.saveTrainingExamples()
 
             # Save a copy of the old model
-            self.model.saveCheckpoint(MODEL_FOLDER, MODEL_FILE_NAME + MODEL_FILE_EXTENSION)
-            self.competitor_model.loadCheckpoint(MODEL_FOLDER, MODEL_FILE_NAME + MODEL_FILE_EXTENSION)
+            self.model.saveCheckpoint()
+            self.competitor_model.loadCheckpoint()
 
             # Shuffle training examples
             training_examples = []
             for example in self.training_examples:
-                training_examples.append((Chess.integerRepresentation(example[0]), example[2], example[3]))
+                training_examples.append((Chess.planeRepresentation(example[0]), example[2], example[3]))
             random.shuffle(training_examples)
-            start = time.time()
+
             # Train the new model
             self.competitor_model.train_nn(training_examples)
-            print(f"Training time: {time.time() - start}")
 
             # Compare the new model with the old model
             competitor_mcts = MCTS(self.competitor_model)
@@ -162,11 +168,11 @@ class Trainer():
 
             if win_fraction > REPLACE_THRESHOLD: # Replace the model with the competitor
                 print("Replacing with competitor")
-                self.model.loadCheckpoint(MODEL_FOLDER, MODEL_FILE_NAME)
+                self.competitor_model.saveCheckpoint()
+                self.model.loadCheckpoint()
             else: # The competitor was not good enough, load the original model
                 print("Keeping original")
-                self.competitor_model.saveCheckpoint(MODEL_FOLDER, MODEL_FILE_NAME)
-                self.model.loadCheckpoint(MODEL_FOLDER, MODEL_FILE_NAME)
+                self.model.loadCheckpoint()
     
     def playGame(self, agent1, agent2):
         """
@@ -192,6 +198,7 @@ class Trainer():
                 move = Chess.getMirroredMoveFromAction(action)
 
             # Make the move and get the resulting board & game result
+
             board, current_player = Chess.getNextState(board, move)
             result = Chess.getGameEnded(board, current_player) 
         
@@ -212,7 +219,7 @@ class Trainer():
         wins2 = 0
         draws = 0
 
-        for _ in tqdm(range(NUMBER_OF_GAMES_TO_PLAY//2), desc="White"): # Play half of the games with agent1 as white
+        for _ in tqdm(range(NUMBER_OF_GAMES_TO_PLAY//2), desc="White Games"): # Play half of the games with agent1 as white
             result = self.playGame(agent1, agent2)
             if result == 1:
                 wins1 += 1
@@ -221,7 +228,7 @@ class Trainer():
             else:
                 draws += 1
 
-        for _ in tqdm(range(NUMBER_OF_GAMES_TO_PLAY//2), desc="White"): # Play half of the games with agent2 as white
+        for _ in tqdm(range(NUMBER_OF_GAMES_TO_PLAY//2), desc="Black Games"): # Play half of the games with agent2 as white
             result = self.playGame(agent2, agent1)
             if result == 1:
                 wins2 += 1
@@ -245,5 +252,3 @@ class Trainer():
         if os.path.exists(filepath):
             with open(filepath, "rb") as f:
                 return Unpickler(f).load()
-
-    

@@ -3,7 +3,7 @@ import numpy as np
 import Chess
 from Model import Model
 
-NUMBER_OF_MOVES_TO_SIMULATE = 35
+NUMBER_OF_MOVES_TO_SIMULATE = 30
 C = 1.0 # Exploration vs. Exploitation bias for UCB calculation
 
 class MCTS:
@@ -55,13 +55,12 @@ class MCTS:
         ended = Chess.getGameEnded(canonical_board, Chess.WHITE)
 
         if ended != 0: # If the game is over, return the outcome
-            return ended
+            return -ended
         
         if state not in self.Ps: # State hasn't been visited yet
             
             #Get policy and value prediction from the model
-            self.Ps[state], value = self.model.predict(Chess.integerRepresentation(canonical_board))
-            
+            self.Ps[state], value = self.model.predict(Chess.planeRepresentation(canonical_board))
             # Remove illegal moves and renormalize
             mask = Chess.getValidMoves(canonical_board)
             self.Ps[state] = self.Ps[state] * mask
@@ -70,7 +69,7 @@ class MCTS:
             if sum > 0:
                 self.Ps[state] /= sum
             else:
-                print("probably not good")
+                print("All valid moves masked.")
                 self.Ps[state] += 1/len(self.Ps[state])
                 
             self.Ns[state] = 0
