@@ -16,12 +16,12 @@ An attempt to create a chess engine based on Deepmind's [AlphaGo Zero paper](htt
 
 3. Create an enviroment:
     ```bash
-    python -m venv env
+    python -m venv .venv
     ```
 
 4. Activate the environment:
     ```bash
-    source env/bin/activate
+    .\.venv\Scripts\activate
     ```
 
 3. Install the required dependencies:
