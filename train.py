@@ -1,21 +1,21 @@
-from torch.utils.data import Dataset, DataLoader
+import logging
+import pickle
 
+import chess
+import numpy as np
 from chess import (
+    BLACK,
+    WHITE,
     Board,
     Move,
     pgn,
     square_file,
-    square_rank,
     square_mirror,
-    WHITE,
-    BLACK,
+    square_rank,
 )
-import chess
-import numpy as np
-import logging
-import pickle
+from torch.utils.data import DataLoader, Dataset
 
-DIRECTIONS = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]
+DIRECTIONS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 KNIGHT_MOVES = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
 ACTION_SIZE = 4672
 """
@@ -32,7 +32,7 @@ queen.
 """
 
 
-def move_to_action(move: Move, turn: bool) -> int:
+def move_to_action(move: Move, turn: bool = WHITE) -> int:
     from_square = move.from_square if turn == WHITE else square_mirror(move.from_square)
     to_square = move.to_square if turn == WHITE else square_mirror(move.to_square)
 
@@ -56,31 +56,41 @@ def move_to_action(move: Move, turn: bool) -> int:
 
         plane = (7 * direction) + (distance - 1)
 
-    return from_square * 64 + plane
+    return from_square * 73 + plane
 
 
-def action_to_move(action: int, turn: bool) -> Move:
-    from_square = action // 64
-    from_file, from_rank = square_file(from_square), square_file(from_square)
+def action_to_move(action: int, turn: bool = WHITE) -> Move:
+    assert 0 <= action < ACTION_SIZE
 
-    plane = action % 64
+    from_square = action // 73
+    from_file, from_rank = square_file(from_square), square_rank(from_square)
+
+    promotion = None
+
+    plane = action % 73
 
     # Queen Moves
     if plane < 56:
-        pass
+        direction = plane // 7
+        distance = (plane % 7) + 1
+
+        delta_file, delta_rank = distance * np.array(DIRECTIONS[direction])
     # Knight Moves
     elif plane < 64:
-        pass
+        delta_file, delta_rank = KNIGHT_MOVES[plane - 56]
     # Underpromotions:
     else:
-        plane -= 64
+        promotion = (plane - 64) % 3 + 2
+        delta_file = (plane - 64) // 3 - 1
+        delta_rank = 1
 
-        delta_file = (plane // 3) - 1
+    to_file, to_rank = from_file + delta_file, from_rank + delta_rank
 
-        to_file, to_rank = from_file + delta_file, from_rank + 1
-        to_square = to_file + to_rank * 8
+    to_square = chess.square(to_file, to_rank)
 
-        promotion = (plane % 3) + 2
+    if turn == BLACK:
+        from_square = square_mirror(from_square)
+        to_square = square_mirror(to_square)
 
     return Move(from_square, to_square, promotion)
 
