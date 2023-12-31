@@ -1,5 +1,4 @@
 import numpy as np
-import os
 from chess import Board, Move
 import chess
 import chess.pgn
@@ -15,32 +14,19 @@ The actual action size is 4672 (https://arxiv.org/pdf/1712.01815.pdf). The extra
 of pawn underpromotions, which I am too lazy to deal with.
 """
 
-PGN_FOLDER = "examples"
-PGN_FILE_NAME = "starting games"
-PGN_FILE_EXTENSION = ".pgn"
 
-
-def getInitBoard():
+def get_init_board() -> Board:
     """
-    Returns a representation of the starting board
+    Returns the starting chess board
     """
     return Board()
 
-def getBoardSize():
+def get_next_state(board: Board, move: Move) -> (Board, bool):
     """
-    Returns the board dimensions
+    Returns the board state after making the given move, along with the player to play next
     """
-    return (BOARD_SIZE, BOARD_SIZE)
 
-def getNextState(board: Board, move: Move):
-    """
-    Returns the board after applying the action and the player to play next
-    Parameters:
-        board: Chess board
-        player: Current player (WHITE or BLACK)
-        action: Action taken by player
-    """
-    if isPromotion(board, move):
+    if is_promotion(board, move) and move.promotion == None:
         move.promotion = chess.QUEEN
 
     new_board = board.copy()
@@ -49,7 +35,10 @@ def getNextState(board: Board, move: Move):
 
     return new_board, next_player
 
-def isPromotion(board: Board, move: Move):
+def is_promotion(board: Board, move: Move) -> bool:
+    """
+    Returns true if the move is a promotion, false otherwise.
+    """
     piece = board.piece_at(move.from_square)
     if piece.piece_type == chess.PAWN:
         if piece.color == WHITE and (move.to_square >= 56 and move.to_square <= 63):
@@ -58,62 +47,53 @@ def isPromotion(board: Board, move: Move):
             return True
     return False
 
-def getMoveFromAction(action):
-    from_square = action // 64
-    to_square = action % 64
+def action_to_move(action: int, player: bool = WHITE) -> Move:
+    """
+    Returns the move corresponding to an action from the perspective
+    of the given plauer
+    """
+    from_square = (action // 64) if player else (63 - action // 64)
+    to_square = (action % 64) if player else (63 - action % 64)
 
     return Move(from_square, to_square)
 
-def getMirroredMoveFromAction(action):
-    from_square = action // 64
-    to_square = action % 64
-
-    mirrored_from_square = 63 - from_square
-    mirrored_to_square = 63 - to_square
-
-    return Move(mirrored_from_square, mirrored_to_square)
-
-def actionFromMove(move: Move):
-    return move.from_square * 64 + move.to_square
-
-def mirroredActionFromMove(move: Move):
-    return (63 - move.from_square) * 64 + (63 - move.to_square)
-
-def getValidMoves(board: Board):
+def move_to_action(move: Move, player: bool = WHITE) -> int:
     """
-    Returns a binary vector of actions, 1 if the move is valid, 0 otherwise.
-    Parameters:
-        board: Chess board
+    Returns the action corresponding to a move from the perspective
+    of the given player
     """
-    action_space = np.zeros(shape=ACTION_SIZE)
+    from_square = move.from_square if player else 63 - move.from_square
+    to_square = move.to_square if player else 63 - move.to_square
+
+    return from_square * 64 + to_square
+
+def get_valid_actions(board: Board) -> np.ndarray:
+    """
+    Returns an array of valid actions for the given board state.
+    """
+    valid_actions = np.zeros(shape=ACTION_SIZE)
     for move in board.generate_legal_moves():
-        action_space[(move.from_square * 64) + move.to_square] = 1
-    return action_space
+        valid_actions[move_to_action(move)] = 1
+    return valid_actions
 
-def getGameEnded(board: Board, player):
+def get_game_ended(board: Board, player: bool) -> float:
     """
-    Returns 0 if game has not ended, 1 if player won, -1 if player lost, 1e-4 for draw.
-    Parameters:
-        board: Chess Board
-        player: Current Player (WHITE or BLACK)            
+    Returns 0 if game has not ended, 1 if player won, -1 if player lost, 1e-4 for draw.          
     """
     result = board.result()
 
     if result == "*": # Not complete
-        return 0
+        return 0.0
     elif result == "1-0": # White won
-        return 1 if player == WHITE else -1
+        return 1.0 if player == WHITE else -1.0
     elif result == "0-1": # Black won
-        return -1 if player == WHITE else 1
+        return -1.0 if player == WHITE else 1.0
     elif result == "1/2-1/2": # Draw
         return 1e-4
 
-def getCanonicalForm(board: Board, player):
+def get_canonical_form(board: Board, player: bool) -> Board:
     """
     Returns the canonical form of the board.
-    Parameters:
-        board: Chess board
-        player: Current player (WHITE or BLACK)
     """
     if (player == WHITE):
         return board
@@ -123,27 +103,22 @@ def getCanonicalForm(board: Board, player):
         return new_board
 
 
-def stringRepresentation(board: Board):
+def get_fen(board: Board) -> str:
     """
     Returns a FEN representation of the board
-    Parameters:
-        board: Chess board  
     """
     return board.fen()
 
-def planeRepresentation(board: Board):
+def get_model_representation(board: Board) -> np.ndarray:
     """
     Returns a representation of the board suitable for input to a neural network.
-    The layout of the planes is similar to AlphaZero's implementation (https://shorturl.at/gBN27)
     Pawns   - Plane 0
     Knights - Plane 1
     Bishops - Plane 2
     Rooks   - Plane 3
     Queens  - Plane 4
     Kings   - Plane 5
-    Positive if white, negative if black
-    Parameters:
-        board: Chess board
+    Each piece is represented by a 1 if white, -1 if black
     """
     nn_board = np.zeros((6, BOARD_SIZE * BOARD_SIZE))
     for i in range(BOARD_SIZE * BOARD_SIZE):
@@ -164,47 +139,8 @@ def planeRepresentation(board: Board):
     nn_board = np.reshape(nn_board, (6, 8, 8))                                              
     return nn_board
 
-def loadFromPGN():
-    filepath = os.path.join(PGN_FOLDER, PGN_FILE_NAME + PGN_FILE_EXTENSION)
-    with open(filepath) as f:
-        training_examples = []
-        game = chess.pgn.read_game(f)
-        while game is not None and len(training_examples) < 200000:
-            result = game.headers.get("Result")
-            board = Board()
-            current_player = board.turn
-            # print(board, end="\n\n")
-            for move in game.mainline_moves():
-                canonical_board = getCanonicalForm(board, current_player)
-                if board.turn == WHITE:
-                    action = actionFromMove(move)
-                else:
-                    action = mirroredActionFromMove(move)
-
-                policy = np.zeros(ACTION_SIZE)
-                policy[action] = 1.0
-
-                if current_player == WHITE:
-                    if result == "1-0":
-                        value = 1.0
-                    elif result == "0-1":
-                        value = -1.0
-                    else:
-                        value = 0
-                else:
-                    if result == "1-0":
-                        value = -1.0
-                    elif result == "0-1":
-                        value = 1.0
-                    else:
-                        value = 0
-
-                training_examples.append([canonical_board, current_player, policy, value])
-
-                board, current_player = getNextState(board, move)
-                if not board.is_valid():
-                    print(f"Invalid Board" + board.status)
-                # print(board, end="\n\n")
-            game = chess.pgn.read_game(f)
-        return training_examples
-
+def load_pgn_game(pgn_file) -> chess.pgn.Game:
+    """
+    Returns a chess game object from the given pgn file
+    """
+    return chess.pgn.read_game(pgn_file)

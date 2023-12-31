@@ -22,7 +22,7 @@ class MCTS:
 
         self.model = model
     
-    def getActionProbabilities(self, canonical_board, temperature):
+    def getActionProbabilities(self, canonical_board, temperature: float) -> np.ndarray:
         """
         Returns a policy vector for all actions from this state
         Parameters:
@@ -34,35 +34,34 @@ class MCTS:
         for _ in range(NUMBER_OF_MOVES_TO_SIMULATE):
             self.search(canonical_board)
         
-        state = Chess.stringRepresentation(canonical_board)
+        state = Chess.get_fen(canonical_board)
 
         Na = [self.Nsa[(state, action)] if (state, action) in self.Nsa else 0 for action in range(Chess.ACTION_SIZE)]
 
         if temperature == 0: # Exploit the best action
-            best_action = np.array(Na).argmax()
-            probabilities = [0] * len(Na)
+            best_action = np.argmax(Na)
+            probabilities = np.zeros(Chess.ACTION_SIZE)
             probabilities[best_action] = 1
             return probabilities
         else: # Modify according to temperature and renormalize
-            Na = [n ** (1. / temperature) for n in Na]
-            sum = np.sum(Na)
-            probabilities = [n / sum for n in Na]
+            Na = np.array([n ** (1. / temperature) for n in Na])
+            probabilities = Na / Na.sum()
             return probabilities
 
     def search(self, canonical_board):
-        state = Chess.stringRepresentation(canonical_board)
+        state = Chess.get_fen(canonical_board)
 
-        ended = Chess.getGameEnded(canonical_board, Chess.WHITE)
+        ended = Chess.get_game_ended(canonical_board, Chess.WHITE)
 
         if ended != 0: # If the game is over, return the outcome
             return -ended
         
         if state not in self.Ps: # State hasn't been visited yet
-            
             #Get policy and value prediction from the model
-            self.Ps[state], value = self.model.predict(Chess.planeRepresentation(canonical_board))
+            self.Ps[state], value = self.model.predict(Chess.get_model_representation(canonical_board))
+
             # Remove illegal moves and renormalize
-            mask = Chess.getValidMoves(canonical_board)
+            mask = Chess.get_valid_actions(canonical_board)
             self.Ps[state] = self.Ps[state] * mask
 
             sum = np.sum(self.Ps[state])
@@ -76,7 +75,7 @@ class MCTS:
             return -value
         else: # State has been reached before
             # Pick the action with the highest UCT
-            valid_moves = Chess.getValidMoves(canonical_board)
+            valid_moves = Chess.get_valid_actions(canonical_board)
 
             best_UCT = -99999
             best_action = None
@@ -87,12 +86,18 @@ class MCTS:
                         best_UCT = UCT
                         best_action = action
             
+            # Get the best action and corresponding move
             action = best_action
-            move = Chess.getMoveFromAction(action)
-            # Recursively search from the state reached by taking the best action
-            next_state, next_player = Chess.getNextState(canonical_board, move)
-            next_state = Chess.getCanonicalForm(next_state, next_player)
-            value = self.search(next_state)
+            move = Chess.action_to_move(action)
+
+            # Make the move
+            board, next_player = Chess.get_next_state(canonical_board, move)
+
+            # Get the canonical board
+            canonical_board = Chess.get_canonical_form(board, next_player)
+            
+            # Recursively search
+            value = self.search(canonical_board)
 
             # Update the expected value
             if (state, action) in self.Qsa:

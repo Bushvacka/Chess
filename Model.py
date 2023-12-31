@@ -3,6 +3,7 @@ import numpy as np
 from tqdm import tqdm
 import torch
 from torch import nn, optim
+import torch.nn.functional as F
 from torch_utils import AverageMeter
 import Chess
 
@@ -10,6 +11,7 @@ LEARNING_RATE = .001
 DROPOUT = 0.3
 EPOCHS = 10
 BATCH_SIZE = 64
+NUM_LAYERS = 6
 NUM_CHANNELS = 128
 
 MODEL_FOLDER = "models"
@@ -17,54 +19,50 @@ MODEL_FILE_NAME = "model.pth.tar"
 
 torch.backends.cudnn.enabled = False
 
-class Model(nn.Module):
-    def __init__(self):
-        super(Model, self).__init__()
-        self.num_channels = NUM_CHANNELS
+class ConvBlock(nn.Module):
+    def __init__(self, in_channels: int = 256, out_channels: int = 256, kernel_size: int = 3, padding: int = 1, activation: nn.Module = nn.ReLU()):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, padding=padding)
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.activation = activation
+    def forward(self, x):
+        out = self.conv(x)
+        out = self.bn(out)
+        
+        return out
 
-        self.conv_layers = nn.Sequential(
-            nn.Conv2d(6, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-        )
+class ResidualBlock(nn.Module):
+    def __init__(self, num_channels: int = 256):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = ConvBlock(num_channels)
+        self.conv2 = ConvBlock(num_channels, activation=nn.Identity())
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.conv2(out)
+        out += residual
+        out = F.relu(out)
+        return out
+
+class Model(nn.Module):
+    def __init__(self, num_channels: int = 256, num_residuals: int = 15):
+        super(Model, self).__init__()
+
+        self.conv = ConvBlock(6, num_channels)
+
+        self.residuals = nn.ModuleList([ResidualBlock(num_channels) for _ in range(num_residuals)])
 
         self.policy_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, NUM_CHANNELS, kernel_size=3, padding=1),
-            nn.BatchNorm2d(NUM_CHANNELS),
-            nn.ReLU(),
-            nn.Conv2d(NUM_CHANNELS, 8, kernel_size=1, padding=0),
-            nn.BatchNorm2d(8),
-            nn.ReLU(),
+            ConvBlock(num_channels, 8, kernel_size=1, padding=0),
             nn.Flatten(),
             nn.Linear(8 * 8 * 8, Chess.ACTION_SIZE),
             nn.Softmax(dim=1),
         )
 
         self.value_head = nn.Sequential(
-            nn.Conv2d(NUM_CHANNELS, 1, kernel_size=1, padding=0),
-            nn.BatchNorm2d(1),
-            nn.ReLU(),
+            ConvBlock(num_channels, 1, kernel_size=1, padding=0),
             nn.Flatten(),
             nn.Linear(8 * 8, 64),
-            nn.BatchNorm1d(64),
             nn.ReLU(),
             nn.Linear(64, 1),
             nn.Tanh(),
@@ -72,13 +70,18 @@ class Model(nn.Module):
 
         self.to(torch.device('cuda'))
 
-    def forward(self, state):
-        state = state.view(-1, 6, 8, 8)
-        state = self.conv_layers(state)
-        policy_output = self.policy_head(state)
-        value_output = self.value_head(state)
+    def forward(self, x: torch.Tensor):
+        x = x.view(-1, 6, 8, 8) # Reshape to N X C X H X W
 
-        return policy_output, value_output
+        x = self.conv(x)
+
+        for residual in self.residuals:
+            x = residual(x)
+
+        policy = self.policy_head(x)
+        value = self.value_head(x)
+
+        return policy, value
 
 
     def predict(self, board):
