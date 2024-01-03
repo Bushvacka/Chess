@@ -1,4 +1,5 @@
 import logging
+import os
 import pickle
 
 import numpy as np
@@ -168,11 +169,16 @@ class ChessDataset(Dataset):
         with open(path, "wb+") as f:
             pickle.dump((self.boards, self.policies, self.evaluations), f)
 
-    def load_from_file(self, file_name: str) -> None:
+    def load_file(self, file_name: str) -> None:
         with open(file_name, "rb+") as f:
             self.boards, self.policies, self.evaluations = pickle.load(f)
 
-    def load_from_pgn(self, path: str) -> None:
+    def load_pgn_directory(self, directory: str) -> None:
+        for file_name in os.listdir(directory):
+            if file_name.endswith(".pgn"):
+                self.load_pgn(os.path.join(directory, file_name))
+
+    def load_pgn(self, path: str) -> None:
         logging.info(f"Loading games from {path}...")
         with open(path) as f:
             # Iterate through all of the games in the file
@@ -204,4 +210,3 @@ class ChessDataset(Dataset):
 
                     # Move to the next position
                     board.push(move)
-        logging.info(f"Finished loading games")
