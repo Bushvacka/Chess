@@ -1,7 +1,7 @@
 import logging
 import os
-import pickle
 
+import h5py
 import numpy as np
 import torch
 from chess import (
@@ -28,25 +28,22 @@ from model import ResNet
 DIRECTIONS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 KNIGHT_MOVES = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
 ACTION_SIZE = 4672
-"""
-A move in chess may be described in two parts: selecting the piece to move, and then
-selecting among the legal moves for that piece. We represent the policy π(a|s) by a 8 × 8 × 73
-stack of planes encoding a probability distribution over 4,672 possible moves. Each of the 8×8
-positions identifies the square from which to “pick up” a piece. The first 56 planes encode
-possible ‘queen moves’ for any piece: a number of squares [1..7] in which the piece will be
-moved, along one of eight relative compass directions {N, NE, E, SE, S, SW, W, NW}. The
-next 8 planes encode possible knight moves for that piece. The final 9 planes encode possible
-underpromotions for pawn moves or captures in two possible diagonals, to knight, bishop or
-rook respectively. Other pawn moves or captures from the seventh rank are promoted to a
-queen.
-"""
 
-STEP_HISTORY = 6
+STEP_HISTORY = 1
+NUM_PLANES = STEP_HISTORY * 12 + 4
 
 
-def move_to_action(move: Move, turn: bool = WHITE) -> int:
-    from_square = move.from_square if turn == WHITE else square_mirror(move.from_square)
-    to_square = move.to_square if turn == WHITE else square_mirror(move.to_square)
+def move_mirror(move: Move) -> Move:
+    return Move(
+        square_mirror(move.from_square), square_mirror(move.to_square), move.promotion
+    )
+
+
+def move_to_action(move: Move, board: Board) -> int:
+    move = move if board.turn == WHITE else move_mirror(move)
+
+    from_square = move.from_square
+    to_square = move.to_square
 
     from_file, from_rank = square_file(from_square), square_rank(from_square)
     to_file, to_rank = square_file(to_square), square_rank(to_square)
@@ -71,11 +68,8 @@ def move_to_action(move: Move, turn: bool = WHITE) -> int:
     return from_square * 73 + plane
 
 
-def action_to_move(action: int, turn: bool = WHITE) -> Move:
+def action_to_move(action: int, board: Board) -> Move:
     assert 0 <= action < ACTION_SIZE
-
-    from_square = action // 73
-    from_file, from_rank = square_file(from_square), square_rank(from_square)
 
     promotion = None
 
@@ -90,27 +84,33 @@ def action_to_move(action: int, turn: bool = WHITE) -> Move:
     # Knight Moves
     elif plane < 64:
         delta_file, delta_rank = KNIGHT_MOVES[plane - 56]
-    # Underpromotions:
+    # Underpromotions
     else:
         promotion = (plane - 64) % 3 + 2
         delta_file = (plane - 64) // 3 - 1
         delta_rank = 1
 
-    to_file, to_rank = from_file + delta_file, from_rank + delta_rank
+    # Get the square the piece is moving from
+    from_square = action // 73
+    from_file, from_rank = square_file(from_square), square_rank(from_square)
 
+    # Calculate the square the piece is moving to
+    to_file, to_rank = from_file + delta_file, from_rank + delta_rank
     to_square = square(to_file, to_rank)
 
-    if turn == BLACK:
-        from_square = square_mirror(from_square)
-        to_square = square_mirror(to_square)
+    # Mirror the move if the player is black
+    from_square = from_square if board.turn == WHITE else square_mirror(from_square)
+    to_square = to_square if board.turn == WHITE else square_mirror(to_square)
+
+    # Promote to a queen if the move is not an underpromotion and a pawn is moving to the first or last rank
+    if (
+        promotion == None
+        and board.piece_at(from_square).piece_type == PAWN
+        and to_rank in [0, 7]
+    ):
+        promotion = QUEEN
 
     return Move(from_square, to_square, promotion)
-
-
-def move_mirror(move: Move) -> Move:
-    return Move(
-        square_mirror(move.from_square), square_mirror(move.to_square), move.promotion
-    )
 
 
 def get_canonical_form(board: Board) -> Board:
@@ -129,19 +129,38 @@ def get_model_form(board: Board) -> torch.Tensor:
     """
     Returns a representation of the board suitable for input to a neural network.
     """
-    planes = torch.zeros((STEP_HISTORY, 2, 6, 64), dtype=torch.float32)
+    planes = torch.zeros((STEP_HISTORY * 2 * 6 + 4, 64), dtype=torch.float32)
 
     board_copy = board.copy(stack=min(STEP_HISTORY - 1, len(board.move_stack)))
 
+    # Piece history
     for i in range(len(board_copy.move_stack) + 1):
         for square in range(64):
             if (piece := board_copy.piece_at(square)) != None:
-                planes[i][1 - piece.color][piece.piece_type - 1][square] = 1
+                plane_index = i * 12 + (1 - piece.color) * 6 + (piece.piece_type - 1)
+                planes[plane_index][square] = 1
 
         if len(board_copy.move_stack) > 0:
             board_copy.pop()
 
-    return planes.reshape((-1, 8, 8))
+    # Castling rights
+    planes[12 * STEP_HISTORY + 0] = board.has_kingside_castling_rights(WHITE)
+    planes[12 * STEP_HISTORY + 1] = board.has_queenside_castling_rights(WHITE)
+    planes[12 * STEP_HISTORY + 2] = board.has_kingside_castling_rights(BLACK)
+    planes[12 * STEP_HISTORY + 3] = board.has_queenside_castling_rights(BLACK)
+
+    return planes.reshape((NUM_PLANES, 8, 8))
+
+
+def play_game(white, black) -> str:
+    board = Board()
+
+    while not board.is_game_over():
+        # print(board)
+        move = white(board) if board.turn == WHITE else black(board)
+
+        board.push(move)
+    return board.result()
 
 
 class ChessDataset(Dataset):
@@ -166,23 +185,34 @@ class ChessDataset(Dataset):
         self.evaluations.append(evaluation)
 
     def save(self, path: str) -> None:
-        with open(path, "wb+") as f:
-            pickle.dump((self.boards, self.policies, self.evaluations), f)
+        logging.info(f"Saving {len(self.boards)} examples to {path}")
+        with h5py.File(path, "w") as f:
+            f.create_dataset("boards", data=[board.numpy() for board in self.boards])
+            f.create_dataset("policies", data=self.policies)
+            f.create_dataset("evaluations", data=self.evaluations)
 
-    def load_file(self, file_name: str) -> None:
-        with open(file_name, "rb+") as f:
-            self.boards, self.policies, self.evaluations = pickle.load(f)
+    def load_file(self, path: str) -> None:
+        logging.info(f"Loading examples from {path}")
+        with h5py.File(path, "r") as f:
+            self.boards = [torch.from_numpy(board) for board in f["boards"][:]]
+            self.policies = f["policies"][:]
+            self.evaluations = f["evaluations"][:]
 
     def load_pgn_directory(self, directory: str) -> None:
         for file_name in os.listdir(directory):
             if file_name.endswith(".pgn"):
                 self.load_pgn(os.path.join(directory, file_name))
 
-    def load_pgn(self, path: str) -> None:
-        logging.info(f"Loading games from {path}...")
+    def load_pgn(self, path: str) -> int:
+        logging.info(f"Loading games from {path}")
+
+        games_read = 0
+
         with open(path) as f:
             # Iterate through all of the games in the file
             while (game := pgn.read_game(f)) is not None:
+                games_read += 1
+
                 board = game.board()
                 result = game.headers.get("Result")
 
@@ -196,7 +226,7 @@ class ChessDataset(Dataset):
 
                 # Imitate the player's policy for each mainline move
                 for move in game.mainline_moves():
-                    action = move_to_action(move, board.turn)
+                    action = move_to_action(move, board)
                     policy = np.zeros(ACTION_SIZE, dtype=np.float32)
                     policy[action] = 1.0
 
@@ -210,3 +240,6 @@ class ChessDataset(Dataset):
 
                     # Move to the next position
                     board.push(move)
+
+        logging.info(f"Loaded {games_read} games")
+        return games_read
