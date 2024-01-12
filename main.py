@@ -10,9 +10,11 @@ logging.basicConfig(
 
 def main():
     dataset = ChessDataset()
-    dataset.load_file("resources/examples/dataset.h5")
+    dataset.load("resources/examples/dataset.h5")
 
-    model = ResNet(in_channels=NUM_PLANES, depth=7, num_policies=ACTION_SIZE)
+    model = ResNet(
+        in_channels=NUM_PLANES, depth=12, num_actions=ACTION_SIZE, name="No Annealing"
+    )
     model.fit(dataset, epochs=4, batch_size=800)
     model.save("resources/models/model.pth")
 

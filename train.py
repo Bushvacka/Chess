@@ -23,13 +23,11 @@ from chess import (
 )
 from torch.utils.data import Dataset
 
-from model import ResNet
-
 DIRECTIONS = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)]
 KNIGHT_MOVES = [(2, 1), (1, 2), (-1, 2), (-2, 1), (-2, -1), (-1, -2), (1, -2), (2, -1)]
 ACTION_SIZE = 4672
 
-STEP_HISTORY = 1
+STEP_HISTORY = 3
 NUM_PLANES = STEP_HISTORY * 12 + 4
 
 
@@ -129,9 +127,9 @@ def get_model_form(board: Board) -> torch.Tensor:
     """
     Returns a representation of the board suitable for input to a neural network.
     """
-    planes = torch.zeros((STEP_HISTORY * 2 * 6 + 4, 64), dtype=torch.float32)
+    planes = torch.zeros((STEP_HISTORY * 12 + 4, 64), dtype=torch.float32)
 
-    board_copy = board.copy(stack=min(STEP_HISTORY - 1, len(board.move_stack)))
+    board_copy = board.copy(stack=STEP_HISTORY - 1)
 
     # Piece history
     for i in range(len(board_copy.move_stack) + 1):
@@ -150,6 +148,15 @@ def get_model_form(board: Board) -> torch.Tensor:
     planes[12 * STEP_HISTORY + 3] = board.has_queenside_castling_rights(BLACK)
 
     return planes.reshape((NUM_PLANES, 8, 8))
+
+
+def get_legal_actions(board: Board) -> np.ndarray:
+    actions = np.zeros(ACTION_SIZE, dtype=np.float32)
+
+    for move in board.legal_moves:
+        actions[move_to_action(move, board)] = 1
+
+    return actions
 
 
 def play_game(white, black) -> str:
@@ -191,7 +198,7 @@ class ChessDataset(Dataset):
             f.create_dataset("policies", data=self.policies)
             f.create_dataset("evaluations", data=self.evaluations)
 
-    def load_file(self, path: str) -> None:
+    def load(self, path: str) -> None:
         logging.info(f"Loading examples from {path}")
         with h5py.File(path, "r") as f:
             self.boards = [torch.from_numpy(board) for board in f["boards"][:]]
