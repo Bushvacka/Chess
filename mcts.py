@@ -7,8 +7,6 @@ from chess import Board
 from model import ResNet
 from train import ACTION_SIZE, STEP_HISTORY, move_to_action
 
-NUM_SIMULATIONS = 800
-
 DIRICHLET_NOISE = 0.3
 NOISE_WEIGHT = 0.25
 
@@ -17,33 +15,49 @@ BASE_EXPLORATION = 19652
 
 
 class Node:
-    def __init__(self, board: Board, prior: float):
+    def __init__(self, board: Board, prior: float) -> None:
         self.num_visits = 0
         self.total_value = 0
         self.prior = prior
         self.board = board
         self.children = {}
 
-    def get_Q(self):
+    def get_Q(self) -> float:
         return self.total_value / self.num_visits if self.num_visits > 0 else 0
 
-    def is_leaf(self):
+    def is_leaf(self) -> bool:
         return len(self.children) == 0
 
 
 class MCTS:
-    def __init__(self, model: ResNet):
+    def __init__(self, model: ResNet, num_simulations: int = 800) -> None:
         self.model = model
+        self.num_simulations = num_simulations
 
-    def run(self, board: Board):
+    def predict(self, board: Board, temperature: float = 0) -> int:
         root = Node(board, 0)
 
+        # Add noise to the root
         self.expand(root)
         self.add_exploration_noise(root)
 
-        for i in range(NUM_SIMULATIONS):
-            logging.info(f"Simulation {i}/{NUM_SIMULATIONS}")
+        # Run simulations
+        for i in range(self.num_simulations):
+            logging.info(f"Simulation {i + 1}/{self.num_simulations}")
             self.search(root)
+
+        # Select an action
+        visits = [(child.num_visits, action) for action, child in root.children.items()]
+
+        if temperature == 0:
+            _, action = max(visits)
+        else:
+            visits = [(n ** (1 / temperature), action) for n, action in visits]
+            total = sum(n for n, _ in visits)
+            probs = [n / total for n, _ in visits]
+            action = np.random.choice([action for _, action in visits], p=probs)
+
+        return action
 
     def search(self, node: Node) -> float:
         if node.is_leaf():
@@ -94,6 +108,6 @@ class MCTS:
         noises = np.random.gamma(DIRICHLET_NOISE, 1, ACTION_SIZE)
 
         for action, noise in zip(actions, noises):
-            node.children[action].P = (
-                node.children[action].P * (1 - NOISE_WEIGHT) + noise * NOISE_WEIGHT
+            node.children[action].prior = (
+                node.children[action].prior * (1 - NOISE_WEIGHT) + noise * NOISE_WEIGHT
             )

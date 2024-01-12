@@ -8,6 +8,7 @@ from torch import nn, optim
 from torch.optim.lr_scheduler import MultiStepLR
 from torch.utils.data import DataLoader, Dataset, random_split
 from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm
 
 from train import get_canonical_form, get_legal_actions, get_model_form
 
@@ -54,10 +55,10 @@ class ResBlock(nn.Module):
 class ResNet(nn.Module):
     def __init__(
         self,
-        in_channels: int = 40,
-        num_channels: int = 256,
+        in_channels,
+        num_actions,
         depth: int = 20,
-        num_actions: int = 4672,
+        num_channels: int = 256,
         device: str = "cuda",
         name: str = "ResNet",
     ) -> None:
@@ -120,7 +121,11 @@ class ResNet(nn.Module):
             [TRAIN_SPLIT, 1 - TRAIN_SPLIT],
         )
 
-        train = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        # Can't use num_workers > 0 because Windows sucks
+        # Feel free to change this if you're on an OS not created by the worst corporation in the world
+        train = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
+        )
 
         # Initialize the optimizer and learning rate scheduler
         optimizer = optim.SGD(
@@ -130,7 +135,16 @@ class ResNet(nn.Module):
             weight_decay=WEIGHT_DECAY,
         )
 
-        scheduler = MultiStepLR(optimizer, milestones=[300, 600, 800, 1000], gamma=0.1)
+        scheduler = MultiStepLR(
+            optimizer,
+            milestones=[
+                300e3 // batch_size,
+                600e3 // batch_size,
+                800e3 // batch_size,
+                1000e3 // batch_size,
+            ],
+            gamma=0.1,
+        )
 
         # Define loss functions
         policy_criterion = nn.CrossEntropyLoss()
@@ -140,7 +154,7 @@ class ResNet(nn.Module):
 
         for epoch in range(epochs):
             logging.info(f"Epoch {epoch + 1}/{epochs}")
-            for x, p, v in train:
+            for x, p, v in tqdm(train):
                 optimizer.zero_grad()
 
                 # Convert to single-precision floating point
@@ -190,15 +204,15 @@ class ResNet(nn.Module):
         with torch.no_grad():
             policy, value = self(x.unsqueeze(0))
 
-            policy = policy.numpy()
-            value = value.item
+            policy: np.ndarray = policy.numpy().squeeze()
+            value: float = value.item()
 
             # Mask illegal actions
             policy *= get_legal_actions(board)
 
             # Normalize
-            if sum(policy) > 0:
-                policy /= sum(policy)
+            if policy.sum() > 0:
+                policy /= policy.sum()
             else:
                 logging.warning("All actions masked")
                 policy += 1 / self.num_actions
