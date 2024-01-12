@@ -35,3 +35,6 @@ Based on DeepMind's [AlphaGo Zero paper](https://discovery.ucl.ac.uk/id/eprint/1
     ```
 
 
+## Datasets
+
+The games used for supervised learning were downloaded from the standard category of the [FICS Games Database](https://www.ficsgames.org/download.html).
