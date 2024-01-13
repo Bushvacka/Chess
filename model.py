@@ -10,9 +10,15 @@ from torch.utils.data import DataLoader, Dataset, random_split
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-from train import get_canonical_form, get_legal_actions, get_model_form
+from utils import (
+    ACTION_SIZE,
+    NUM_PLANES,
+    get_canonical_form,
+    get_legal_actions,
+    get_model_form,
+)
 
-INITIAL_LR = 1e-1
+INITIAL_LR = 2e-1
 WEIGHT_DECAY = 1e-4
 MOMENTUM = 0.9
 
@@ -55,8 +61,6 @@ class ResBlock(nn.Module):
 class ResNet(nn.Module):
     def __init__(
         self,
-        in_channels,
-        num_actions,
         depth: int = 20,
         num_channels: int = 256,
         device: str = "cuda",
@@ -64,15 +68,8 @@ class ResNet(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.writer = SummaryWriter(
-            f"./resources/logs/{name} d={depth} p={in_channels} lr={INITIAL_LR} c={WEIGHT_DECAY} m={MOMENTUM} v={VALUE_WEIGHT}"
-        )
-        self.step = 0
-        self.num_actions = num_actions
-        self.device = device
-
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, num_channels, 3, padding=1, bias=False),
+            nn.Conv2d(NUM_PLANES, num_channels, 3, padding=1, bias=False),
             nn.BatchNorm2d(num_channels),
             nn.ReLU(),
         )
@@ -86,7 +83,7 @@ class ResNet(nn.Module):
             nn.BatchNorm2d(2),
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(2 * 8 * 8, self.num_actions),
+            nn.Linear(2 * 8 * 8, ACTION_SIZE),
             nn.Softmax(dim=1),
         )
 
@@ -99,6 +96,26 @@ class ResNet(nn.Module):
             nn.ReLU(),
             nn.Linear(num_channels, 1),
             nn.Tanh(),
+        )
+
+        self.writer = SummaryWriter(
+            f"./resources/logs/{name} d={depth} lr={INITIAL_LR} c={WEIGHT_DECAY} m={MOMENTUM} v={VALUE_WEIGHT}"
+        )
+        self.step = 0
+        self.device = device
+
+        # Initialize the optimizer and learning rate scheduler
+        self.optimizer = optim.SGD(
+            self.parameters(),
+            lr=INITIAL_LR,
+            momentum=MOMENTUM,
+            weight_decay=WEIGHT_DECAY,
+        )
+
+        self.scheduler = MultiStepLR(
+            self.optimizer,
+            milestones=[1e3, 3e3, 5e3],
+            gamma=0.1,
         )
 
         self.to(self.device)
@@ -121,29 +138,8 @@ class ResNet(nn.Module):
             [TRAIN_SPLIT, 1 - TRAIN_SPLIT],
         )
 
-        # Can't use num_workers > 0 because Windows sucks
-        # Feel free to change this if you're on an OS not created by the worst corporation in the world
         train = DataLoader(
             train_dataset, batch_size=batch_size, shuffle=True, num_workers=0
-        )
-
-        # Initialize the optimizer and learning rate scheduler
-        optimizer = optim.SGD(
-            self.parameters(),
-            lr=INITIAL_LR,
-            momentum=MOMENTUM,
-            weight_decay=WEIGHT_DECAY,
-        )
-
-        scheduler = MultiStepLR(
-            optimizer,
-            milestones=[
-                300e3 // batch_size,
-                600e3 // batch_size,
-                800e3 // batch_size,
-                1000e3 // batch_size,
-            ],
-            gamma=0.1,
         )
 
         # Define loss functions
@@ -155,7 +151,7 @@ class ResNet(nn.Module):
         for epoch in range(epochs):
             logging.info(f"Epoch {epoch + 1}/{epochs}")
             for x, p, v in tqdm(train):
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
                 # Convert to single-precision floating point
                 x: torch.Tensor = x.float()
@@ -177,13 +173,15 @@ class ResNet(nn.Module):
                 self.writer.add_scalar("loss/policy", policy_loss, self.step)
                 self.writer.add_scalar("loss/value", value_loss, self.step)
                 self.writer.add_scalar("loss/total", loss, self.step)
-                self.writer.add_scalar("lr", optimizer.param_groups[0]["lr"], self.step)
+                self.writer.add_scalar(
+                    "lr", self.optimizer.param_groups[0]["lr"], self.step
+                )
                 self.step += 1
 
                 # Backpropagate
                 loss.backward()
-                optimizer.step()
-                scheduler.step()
+                self.optimizer.step()
+                self.scheduler.step()
 
             # Log epoch accuracy
             self.writer.add_scalar("accuracy", self.evaluate(test_dataset), epoch)
@@ -204,18 +202,24 @@ class ResNet(nn.Module):
         with torch.no_grad():
             policy, value = self(x.unsqueeze(0))
 
+            # Back to CPU
+            policy = policy.cpu()
+            value = value.cpu()
+
+            # Extract values
             policy: np.ndarray = policy.numpy().squeeze()
             value: float = value.item()
 
             # Mask illegal actions
-            policy *= get_legal_actions(board)
+            legal_actions = get_legal_actions(board)
+            policy *= legal_actions
 
             # Normalize
             if policy.sum() > 0:
                 policy /= policy.sum()
             else:
                 logging.warning("All actions masked")
-                policy += 1 / self.num_actions
+                policy = (1 / len(legal_actions)) * legal_actions
 
         return policy, value
 
