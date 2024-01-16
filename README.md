@@ -1,7 +1,6 @@
 # Chess Engine
 
-Based on DeepMind's [AlphaGo Zero paper](https://discovery.ucl.ac.uk/id/eprint/10045895/1/agz_unformatted_nature.pdf) and [AlphaZero paper](https://arxiv.org/abs/1712.01815). Uses a mix of supervised learning and self-play based reinforcement learning to train a network to act as a policy and value predictor. This network is used in a Monte-Carlo Tree Search algorithm to generate optimal moves for a given board state.
-
+Based on DeepMind's [AlphaGo Zero paper](https://discovery.ucl.ac.uk/id/eprint/10045895/1/agz_unformatted_nature.pdf) and [AlphaZero paper](https://arxiv.org/abs/1712.01815). Uses a mix of supervised learning and self-play based reinforcement learning to train a network to act as a policy and value predictor. Moves are generated using a Monte-Carlo Tree Search which replaces rollouts with predictions from the value head of the network.
 ## Setup
 
 1. Clone the repository to your local machine:
