@@ -1,16 +1,15 @@
-import logging
 import math
 
 import numpy as np
 from chess import Board
 
 from model import ResNet
-from utils import ACTION_SIZE, STEP_HISTORY, move_to_action
+from utils import ACTION_SIZE, move_to_action
 
 DIRICHLET_NOISE = 0.3
 NOISE_WEIGHT = 0.25
 
-INITIAL_EXPLORATION = 1.25
+INITIAL_EXPLORATION = 2
 BASE_EXPLORATION = 19652
 
 
@@ -29,12 +28,12 @@ class Node:
         return len(self.children) == 0
 
 
-def mcts_predict(
+def run_mcts(
     model: ResNet,
     board: Board,
     num_simulations: int = 800,
     temperature: float = 0,
-) -> int:
+) -> tuple[int, np.ndarray]:
     root = Node(board, 0)
 
     # Add noise to the root
@@ -45,10 +44,17 @@ def mcts_predict(
     for _ in range(num_simulations):
         search(root, model)
 
+    # Generate policy
+    policy = np.zeros(ACTION_SIZE)
+    policy[list(root.children.keys())] = [
+        child.num_visits for child in root.children.values()
+    ]
+    policy /= sum(policy)
+
     # Select an action
     action = select_action(root, temperature)
 
-    return action
+    return action, policy
 
 
 def select_action(node: Node, temperature: float) -> int:
@@ -56,10 +62,9 @@ def select_action(node: Node, temperature: float) -> int:
 
     if temperature == 0:
         _, action = max(visits)
-    else:
-        visits = [(n ** (1 / temperature), action) for n, action in visits]
-        total = sum(n for n, _ in visits)
-        probs = [n / total for n, _ in visits]
+    else:  # Softmax sample
+        probs = np.array([math.exp(n) for n, _ in visits])
+        probs /= sum(probs)
         action = np.random.choice([action for _, action in visits], p=probs)
 
     return action
