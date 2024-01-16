@@ -1,15 +1,22 @@
 import logging
 import os
+from concurrent.futures import Future, ProcessPoolExecutor
 
 import h5py
 import numpy as np
 import torch
-from chess import Board, Move, pgn
+from chess import Board, pgn
 from torch.utils.data import Dataset
 
-from mcts import mcts_predict
+from mcts import run_mcts
 from model import ResNet
-from utils import ACTION_SIZE, get_canonical_form, get_model_form, move_to_action
+from utils import (
+    ACTION_SIZE,
+    action_to_move,
+    get_canonical_form,
+    get_model_form,
+    move_to_action,
+)
 
 
 class ChessDataset(Dataset):
@@ -32,6 +39,17 @@ class ChessDataset(Dataset):
         self.boards.append(board)
         self.policies.append(policy)
         self.evaluations.append(evaluation)
+
+    def extend(
+        self, training_examples: list[tuple[torch.Tensor, np.ndarray, float]]
+    ) -> None:
+        for board, policy, evaluation in training_examples:
+            self.add(board, policy, evaluation)
+
+    def trim(self, size: int) -> None:
+        self.boards = self.boards[-size:]
+        self.policies = self.policies[-size:]
+        self.evaluations = self.evaluations[-size:]
 
     def save(self, path: str) -> None:
         logging.info(f"Saving {len(self.boards)} examples to {path}")
@@ -92,3 +110,79 @@ class ChessDataset(Dataset):
 
         logging.info(f"Loaded {games_read} games")
         return games_read
+
+
+import time
+
+
+def self_play(
+    model_path: str, num_games: int = 1
+) -> list[tuple[torch.Tensor, np.ndarray, float]]:
+    # Initialize and load the model
+    model = ResNet(device="cpu")
+    model.load(model_path)
+
+    training_examples = []  # (board, policy, value)
+
+    for i in range(num_games):
+        logging.info(f"Playing game {i + 1}/{num_games}")
+
+        # Stores (board, policy)
+        temp_examples = []
+
+        board = Board()
+
+        # Play the game till termination
+        while not board.is_game_over():
+            action, policy = run_mcts(model, board)
+
+            temp_examples.append((get_model_form(get_canonical_form(board)), policy))
+
+            move = action_to_move(action, board)
+
+            board.push(move)
+
+        result = board.result()
+
+        # Evaluation from the POV of white
+        if result == "1-0":
+            evaluation = 1.0
+        elif result == "0-1":
+            evaluation = -1.0
+        else:
+            evaluation = 0.0
+
+        # Add the training examples to the dataset
+        for board, policy in temp_examples:
+            training_examples.append((board, policy, evaluation))
+
+            # Flip the evaluation for the next player
+            evaluation *= -1
+
+    return training_examples
+
+
+def learn(model: ResNet, dataset: ChessDataset, iterations: int = 100, num_workers: int  = 1):
+    for i in range(iterations):
+        logging.info(f"Iteration {i + 1}/{iterations}")
+
+        # Generate new examples
+        futures: list[Future] = []
+
+        with ProcessPoolExecutor() as executor:
+            for _ in range(num_workers):
+                futures.append(
+                    executor.submit(self_play, "resources/models/model.pth", 80 // num_workers)
+                )
+
+        for future in futures:
+            dataset.extend(future.result())
+
+        # Trim old examples
+        dataset.trim(300e3)
+
+        # Save the updated dataset
+        dataset.save("resources/examples/dataset.h5")
+
+        # Train the model on the new examples
+        model.fit(dataset, epochs=4)
