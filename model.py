@@ -114,7 +114,7 @@ class ResNet(nn.Module):
 
         self.scheduler = MultiStepLR(
             self.optimizer,
-            milestones=[1e3, 3e3, 5e3],
+            milestones=[1e4, 3e4, 5e4],
             gamma=0.1,
         )
 
@@ -131,7 +131,7 @@ class ResNet(nn.Module):
 
         return p, v
 
-    def fit(self, dataset: Dataset, epochs: int = 10, batch_size: int = 512) -> None:
+    def fit(self, dataset: Dataset, epochs: int = 10, batch_size: int = 512, save_path: str = "resources/models/model.pth") -> None:
         # Split dataset into training and validation sets
         train_dataset, test_dataset = random_split(
             dataset,
@@ -186,6 +186,9 @@ class ResNet(nn.Module):
             # Log epoch accuracy
             self.writer.add_scalar("accuracy", self.evaluate(test_dataset), epoch)
 
+        # Save model
+        self.save(save_path)
+
     def predict(self, board: Board) -> tuple[np.ndarray, float]:
         canonical_board = get_canonical_form(board)
 
@@ -218,7 +221,7 @@ class ResNet(nn.Module):
             if policy.sum() > 0:
                 policy /= policy.sum()
             else:
-                logging.warning("All actions masked")
+                logging.warning(f"All actions masked: {board.fen()}")
                 policy = (1 / len(legal_actions)) * legal_actions
 
         return policy, value
